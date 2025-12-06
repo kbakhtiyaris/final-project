@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Water Gun Turret Control</title>
+<style>
+  body { font-family: Arial, sans-serif; background: #222; color: #eee; text-align: center; padding: 20px; }
+  
+  /* Header Styling */
+  .header {
+    background: linear-gradient(135deg, #36caeb 0%, #28d6fd 100%);
+    padding: 40px 20px;
+    border-radius: 15px;
+    margin-bottom: 30px;
+    box-shadow: 0 8px 32px rgba(5, 209, 255, 0.3);
+  }
+  
+  .header h1 {
+    color: #fff;
+    font-size: 48px;
+    margin: 0 0 20px 0;
+    text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+    letter-spacing: 2px;
+  }
+  
+  .project-description {
+    background: rgba(0, 0, 0, 0.2);
+    padding: 20px;
+    border-radius: 10px;
+    margin: 20px 0;
+    font-size: 16px;
+    line-height: 1.6;
+    border-left: 4px solid #fff;
+  }
+  
+  .features-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 15px;
+    margin: 20px 0;
+  }
+  
+  .feature-box {
+    background: rgba(169, 214, 224, 0.1);
+    padding: 15px;
+    border-radius: 8px;
+    border: 2px solid #05d1ff;
+  }
+  
+  .feature-box strong { color: #000000; }
+  
+  .authors-section {
+    background: rgba(156, 156, 156, 0.3);
+    padding: 20px;
+    border-radius: 10px;
+    margin-top: 20px;
+  }
+  
+  .authors-section h3 {
+    color: #010b0e;
+    margin-top: 0;
+    font-size: 20px;
+  }
+  
+  .author-item {
+    padding: 10px;
+    margin: 8px 0;
+    background: rgba(5, 209, 255, 0.05);
+    border-left: 3px solid #05d1ff;
+    text-align: left;
+    border-radius: 5px;
+  }
+  
+  .author-name { font-weight: bold; color: #023b47; }
+  .author-id { font-size: 14px; color: #250303; }
+  
+  h1 { color: #05d1ff; }
+  input[type=range] { width: 300px; }
+  button { font-size: 20px; padding: 15px 30px; background: #e15f5f; color: white; border: none; cursor: pointer; border-radius: 8px; margin-top: 20px; }
+  button:hover { background: #d54b4b; }
+  .back-button { font-size: 14px; padding: 10px 20px; background: #666; margin-top: 10px; }
+  .back-button:hover { background: #555; }
+  .slider-label { font-size: 18px; margin-top: 20px; }
+  #status { margin-top: 15px; }
+  
+  /* Modal styles */
+  .modal {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.6);
+  }
+  .modal-content {
+    background-color: #333;
+    margin: 10% auto;
+    padding: 40px;
+    border-radius: 12px;
+    width: 400px;
+    text-align: center;
+    border: 2px solid #05d1ff;
+  }
+  .modal-content h2 { color: #05d1ff; margin-top: 0; }
+  .modal-content p { font-size: 16px; margin: 20px 0; }
+  .modal-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    margin-top: 30px;
+  }
+  .modal-buttons button {
+    padding: 12px 20px;
+    font-size: 16px;
+  }
+</style>
+
+<script>
+let pan = 90;
+let tilt = 90;
+let controlMode = null; // 'slider', 'mouse', 'wasd'
+
+// WASD movement states
+let moveLeft = false;
+let moveRight = false;
+let moveUp = false;
+let moveDown = false;
+
+// Settings
+const WASD_SPEED = 1.5;
+const MOUSE_SENS = 0.1;
+
+// Show controller selection modal
+function showControllerMenu() {
+  controlMode = null;
+  document.getElementById('controllerModal').style.display = 'block';
+  updateUIForMode();
+}
+
+function selectController(mode) {
+  controlMode = mode;
+  document.getElementById('controllerModal').style.display = 'none';
+  updateUIForMode();
+}
+
+function updateUIForMode() {
+  const sliderContainer = document.getElementById('sliderContainer');
+  const keyboardHint = document.getElementById('keyboardHint');
+  const backButton = document.getElementById('backButton');
+  
+  if (controlMode === 'slider') {
+    sliderContainer.style.display = 'block';
+    keyboardHint.style.display = 'none';
+    backButton.style.display = 'block';
+  } else if (controlMode === 'wasd' || controlMode === 'mouse') {
+    sliderContainer.style.display = 'none';
+    keyboardHint.style.display = 'block';
+    backButton.style.display = 'block';
+  } else {
+    sliderContainer.style.display = 'none';
+    keyboardHint.style.display = 'none';
+    backButton.style.display = 'none';
+  }
+}
+
+// Send updated angles to ESP32
+function sendAim() {
+  fetch('/aim', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pan: Math.round(pan), tilt: Math.round(tilt) })
+  });
+}
+
+function updateAim() {
+  if (controlMode !== 'slider') return;
+  pan = parseInt(document.getElementById('panSlider').value);
+  tilt = parseInt(document.getElementById('tiltSlider').value);
+  document.getElementById('panValue').innerText = pan + "°";
+  document.getElementById('tiltValue').innerText = tilt + "°";
+  sendAim();
+}
+
+function firePump() { fetch('/fire'); }
+function resetPosition() {
+  pan = 90;
+  tilt = 90;
+  if (controlMode === 'slider') {
+    document.getElementById('panSlider').value = 90;
+    document.getElementById('tiltSlider').value = 90;
+  }
+  sendAim();
+}
+
+// -------- MOUSE CLICK CONTROLS -------- //
+document.addEventListener("mousedown", function(e) {
+  if (e.button === 0) {  // Left click
+    firePump();
+  } else if (e.button === 2) {  // Right click
+    resetPosition();
+  }
+});
+
+document.addEventListener("contextmenu", function(e) {
+  e.preventDefault();
+});
+
+// -------- KEYBOARD CONTROLS -------- //
+document.addEventListener("keydown", function(e) {
+  if (controlMode === 'wasd') {
+    switch (e.key.toLowerCase()) {
+      case "d": moveLeft  = true; break;
+      case "a": moveRight = true; break;
+      case "w": moveUp    = true; break;
+      case "s": moveDown  = true; break;
+      case "f": firePump(); break;
+      case "r": resetPosition(); break;
+    }
+  }
+});
+
+document.addEventListener("keyup", function(e) {
+  if (controlMode === 'wasd') {
+    switch (e.key.toLowerCase()) {
+      case "d": moveLeft  = false; break;
+      case "a": moveRight = false; break;
+      case "w": moveUp    = false; break;
+      case "s": moveDown  = false; break;
+    }
+  }
+});
+
+// -------- MOUSE AIM CONTROL -------- //
+document.addEventListener("click", function() {
+  if (controlMode === 'mouse') {
+    document.body.requestPointerLock();
+  }
+});
+
+document.addEventListener("mousemove", function(e) {
+  if (controlMode !== 'mouse' || document.pointerLockElement !== document.body) return;
+
+  pan  -= e.movementX * MOUSE_SENS;
+  tilt += e.movementY * MOUSE_SENS;
+
+  pan = Math.min(180, Math.max(0, pan));
+  tilt = Math.min(150, Math.max(30, tilt));
+
+  sendAim();
+});
+
+// -------- MAIN MOVEMENT LOOP -------- //
+function movementLoop() {
+  if (controlMode !== 'wasd') {
+    requestAnimationFrame(movementLoop);
+    return;
+  }
+  
+  let changed = false;
+
+  if (moveLeft)  { pan -= WASD_SPEED; changed = true; }
+  if (moveRight) { pan += WASD_SPEED; changed = true; }
+  if (moveUp)    { tilt -= WASD_SPEED; changed = true; }
+  if (moveDown)  { tilt += WASD_SPEED; changed = true; }
+
+  pan = Math.min(180, Math.max(0, pan));
+  tilt = Math.min(150, Math.max(30, tilt));
+
+  if (changed) sendAim();
+
+  requestAnimationFrame(movementLoop);
+}
+
+movementLoop();
+
+// Show menu on load
+window.onload = function() {
+  showControllerMenu();
+};
+</script>
+</head>
+<body>
+  <!-- Header with Project Info -->
+  <div class="header">
+    <h1>WATER GUN TURRET CONTROL </h1>
+    
+    <div class="project-description">
+      <p>
+        <strong>Advanced Automated Water Gun System</strong><br>
+        A precision-engineered turret with dual-motor directional control, 
+        featuring real-time aiming capabilities and a recoil stabilization system 
+        to maintain balance and steady performance during operations.
+      </p>
+    </div>
+    
+    <div class="features-list">
+      <div class="feature-box">
+        <strong>Dual Motor Control</strong><br>
+        Pan & Tilt movement for precise aiming
+      </div>
+      <div class="feature-box">
+        <strong>Rapid Fire System</strong><br>
+        High-performance pump mechanism
+      </div>
+      <div class="feature-box">
+        <strong>Recoil Stabilizer</strong><br>
+        Advanced balance & steadiness technology
+      </div>
+    </div>
+    
+    <div class="authors-section">
+      <h3>Project Authors</h3>
+      <div class="author-item">
+        <div class="author-name">Khud Bakhtiyar Iqbal Sofi</div>
+        <div class="author-id">Student ID: 251023227</div>
+      </div>
+      <div class="author-item">
+        <div class="author-name">Rayyan</div>
+      </div>
+      <div class="author-item">
+        <div class="author-name">Yamaan</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Controller Selection Modal -->
+  <div id="controllerModal" class="modal">
+    <div class="modal-content">
+      <h2>Choose Control Method</h2>
+      <p>Select how you want to control the water gun turret:</p>
+      <div class="modal-buttons">
+        <button onclick="selectController('slider')"> Slider Control</button>
+        <button onclick="selectController('wasd')"> WASD + Mouse</button>
+        <button onclick="selectController('mouse')"> Mouse Aiming</button>
+      </div>
+    </div>
+  </div>
+
+  <h1>Gun Control Panel</h1>
+  <h2>You can use the mouse control, WASD control or slider panel to control the water gun made by us.</h2>
+  
+  <div id="sliderContainer" style="display: none;">
+    <div class="slider-label">Pan Angle: <span id="panValue">90°</span></div>
+    <input type="range" min="0" max="180" value="90" id="panSlider" oninput="updateAim()">
+    
+    <div class="slider-label">Tilt Angle: <span id="tiltValue">90°</span></div>
+    <input type="range" min="30" max="150" value="90" id="tiltSlider" oninput="updateAim()">
+  </div>
+
+  <div id="keyboardHint" style="display: none; margin: 30px 0; font-size: 16px;">
+    <p><strong>Controls:</strong></p>
+    <p>W/A/S/D - Aim | F - Fire | R - Reset | Right Click - Reset | Left Click - Fire</p>
+  </div>
+  
+  <br>
+  <button onclick="firePump()">🔫 FIRE!</button><br>
+  <button onclick="resetPosition()">🎯 Reset To Center</button><br>
+  <button id="backButton" class="back-button" onclick="showControllerMenu()" style="display: none;">← Back to Menu</button>
+  
+  <div id="status" style="margin-top:15px;">Status: <span id="statusText">Initializing...</span></div>
+</body>
+</html>
