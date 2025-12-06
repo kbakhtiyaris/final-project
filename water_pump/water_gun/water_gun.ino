@@ -48,48 +48,6 @@ const char* webpage = R"rawliteral(
   .slider-label { font-size: 18px; margin-top: 20px; }
   #status { margin-top: 15px; }
 </style>
-//<script>
-//function updateAim() {
-//  const pan = document.getElementById('panSlider').value;
-//  const tilt = document.getElementById('tiltSlider').value;
-//  document.getElementById('panValue').innerText = pan + "°";
-//  document.getElementById('tiltValue').innerText = tilt + "°";
-//
-//  fetch('/aim', {
-//    method: 'POST',
-//    headers: { 'Content-Type': 'application/json' },
-//    body: JSON.stringify({pan: parseInt(pan), tilt: parseInt(tilt)})
-//  });
-//}
-//
-//function firePump() {
-//  document.getElementById('status').innerText = "Firing...";
-//  fetch('/fire').then(() => {
-//    setTimeout(() => document.getElementById('status').innerText = "Ready", 600);
-//  });
-//}
-//
-//function resetPosition() {
-//  fetch('/reset').then(() => {
-//    document.getElementById('panSlider').value = 90;
-//    document.getElementById('tiltSlider').value = 90;
-//    updateAim();
-//  });
-//}
-//
-//function refreshStatus() {
-//  fetch('/status').then(response => response.json()).then(data => {
-//    document.getElementById('statusText').innerText = 
-//      "Pan: " + data.pan + "°, Tilt: " + data.tilt + "°, Battery: " + data.battery;
-//  });
-//}
-//
-//setInterval(refreshStatus, 1000);
-//window.onload = function() {
-//  updateAim(); 
-//  refreshStatus();
-//};
-//</script>
 <script>
 let pan = 90;
 let tilt = 90;
@@ -101,7 +59,7 @@ let moveUp = false;
 let moveDown = false;
 
 // Settings
-const WASD_SPEED = 1.5;     // degrees per frame
+const WASD_SPEED = 1;     // degrees per frame
 const MOUSE_SENS   = 0.1;  // lower = smoother, higher = faster
 
 let mouseControlEnabled = true;
@@ -188,16 +146,8 @@ movementLoop();
 </head>
 <body>
   <h1>Gun Control panel.</h1>
-  <h1></h1>
-  
-  <div class="slider-label">Tilt Angle: <span id="tiltValue">90°</span></div>
-  <input type="range" min="30" max="150" value="90" id="tiltSlider" oninput="updateAim()">
-  
-  <div class="slider-label">Pan Angle: <span id="panValue">90°</span></div>
-  <input type="range" min="0" max="180" value="90" id="panSlider" oninput="updateAim()">
-  
-  <div class="slider-label">Tilt Angle: <span id="tiltValue">90°</span></div>
-  <input type="range" min="30" max="150" value="90" id="tiltSlider" oninput="updateAim()">
+  <h2>About the project.</h2>
+  <h3>This is a water gun turret, it can go from 0 to 180 degrees on the pan axis and 30 to 150 degrees in the tilt axis.\n u can use mouse to control the turret or control it using awsd keys. use f to fire and r to reset.</h3>
   
   <br>
   <button onclick="firePump()">FIRE!</button><br>

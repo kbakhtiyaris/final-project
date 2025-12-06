@@ -6,7 +6,7 @@ from collections import deque
 from datetime import datetime
 
 # ESP32 configuration
-ESP32_IP = "192.168.4.1"  # Change to your ESP32 IP
+ESP32_IP = "10.89.109.196"  # Change to your ESP32 IP
 ESP32_PORT = 80
 BASE_URL = f"http://{ESP32_IP}:{ESP32_PORT}"
 
@@ -20,7 +20,7 @@ SCREEN_HEIGHT = 720
 
 # Servo angle ranges
 PAN_MIN, PAN_MAX = 0, 180
-TILT_MIN, TILT_MAX = 0, 180
+TILT_MIN, TILT_MAX = 30, 150
 
 # State management
 class ControlState:
@@ -66,18 +66,25 @@ def send_fire_command():
     return False
 
 def mouse_callback(event, x, y, flags, param):
-    """Handle mouse events"""
     global state
-    
+
     if event == cv2.EVENT_MOUSEMOVE:
-        # Map mouse position to servo angles
-        pan = int((x / state.frame_width) * (PAN_MAX - PAN_MIN) + PAN_MIN)
-        tilt = int(((state.frame_height - y) / state.frame_height) * (TILT_MAX - TILT_MIN) + TILT_MIN)
-        
-        # Constrain angles
+        # INVERTED controls:
+        # X inverted: use (frame_width - x)
+        # Y inverted: do not subtract from frame_height
+        inv_x = state.frame_width - x
+        inv_y = y
+
+        pan = int((inv_x / state.frame_width) * (PAN_MAX - PAN_MIN) + PAN_MIN)
+        tilt = int((inv_y / state.frame_height) * (TILT_MAX - TILT_MIN) + TILT_MIN)
+
         pan = max(PAN_MIN, min(PAN_MAX, pan))
         tilt = max(TILT_MIN, min(TILT_MAX, tilt))
-        
+
+        if time.time() - state.last_aim_time > 0.05:
+            send_aim_command(pan, tilt)
+            state.last_aim_time = time.time()
+       
         # Only send if changed (throttle at 20Hz)
         if time.time() - state.last_aim_time > 0.05:
             send_aim_command(pan, tilt)
@@ -113,8 +120,7 @@ def detect_persons(frame):
         small_frame,
         winStride=(8, 8),
         padding=(8, 8),
-        scale=1.05,
-        finalThreshold=2.0
+        scale=1.05
     )
     
     # Scale back to original frame
