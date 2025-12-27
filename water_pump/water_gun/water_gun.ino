@@ -5,8 +5,8 @@
 // WiFi Credentials - replace with your network infoTilt
 //const char* ssid = "FiberHGW_TPFAC0_2.4GHz";
 //const char* password = "dNWwNHKD";
-const char* ssid = "Redmi11";
-const char* password = "123456789";
+const char* ssid = "OPPOA55";
+const char* password = "12312345";
 
 
 // Pin configuration
@@ -26,7 +26,7 @@ int tiltAngle = 90;
 const int MIN_PAN = 0;
 const int MAX_PAN = 180;
 const int MIN_TILT = 30;
-const int MAX_TILT = 150;
+const int MAX_TILT = 130;
 
 // Fire duration (ms)
 const int FIRE_DURATION = 500;
