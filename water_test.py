@@ -1,150 +1,302 @@
+
 import cv2
-import requests
-import threading
-import time
 import numpy as np
+import requests
+import time
+import threading
+from collections import deque
 
-# Configuration - Replace with your values
-ESP32_IP = "10.89.109.196"  # Your ESP32 IP address
+# ------------------------- ESP32 configuration -------------------------
+ESP32_IP = "10.42.0.225"   # <-- change to your ESP32 IP
 ESP32_PORT = 80
-IP_CAM_URL = "http://10.89.109.190:8080/video"  # Your IP cam stream URL
+BASE_URL = f"http://{ESP32_IP}:{ESP32_PORT}"
 
-# Frame and servo calibration settings
-FRAME_WIDTH = 640
-FRAME_HEIGHT = 480
-PAN_SCALE = 0.1   # Convert pixel X offset to servo angle degrees
-TILT_SCALE = 0.1  # Convert pixel Y offset to servo angle degrees
+# --------------------------- Video source ------------------------------
+VIDEO_SOURCE = 0           # or an IP cam URL
 
-class WaterGunController:
-    def __init__(self, esp32_ip):
-        self.esp32_url = f"http://{esp32_ip}"
-        self.current_pan = 90
-        self.current_tilt = 90
-        self.fire_lock = threading.Lock()
+# ------------------------- Servo angle ranges --------------------------
+PAN_MIN, PAN_MAX = 0, 180
+TILT_MIN, TILT_MAX = 30, 150
 
-    def aim(self, pan, tilt):
-        """Send aiming command to ESP32."""
+# ------------------------- Control parameters --------------------------
+SEND_PERIOD = 0.08         # seconds between aim posts (~12–14 Hz)
+SMOOTH_ALPHA = 0.10        # 0..1: bigger = snappier, smaller = smoother
+MIN_AREA = 800             # minimum blob area to consider (px)
+AUTO_FIRE = False          # set True to auto-fire on big area
+AUTO_FIRE_AREA = 15000     # area threshold for auto-fire
+RELOAD_SECONDS = 0.8       # cooldown after fire
+
+# -------------------------- Global state -------------------------------
+class State:
+    def __init__(self):
+        self.pan = 90
+        self.tilt = 90
+        self.last_sent = 0.0
+        self.reload_until = 0.0
+        self.frame_w = 1280
+        self.frame_h = 720
+        self.target_area = 0
+        self.have_target = False
+
+state = State()
+
+# --------------------------- Async HTTP queue --------------------------
+# Offload ESP32 requests so video loop never waits on network
+class CommandSender:
+    def __init__(self, base_url):
+        self.base_url = base_url
+        self.session = requests.Session()
+        self.q = deque(maxlen=100)
+        self.stop = False
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def run(self):
+        while not self.stop:
+            if self.q:
+                item = self.q.popleft()
+                typ, payload = item
+                try:
+                    if typ == "aim":
+                        self.session.post(f"{self.base_url}/aim", json=payload, timeout=0.4)
+                    elif typ == "fire":
+                        self.session.get(f"{self.base_url}/fire", timeout=0.4)
+                except Exception:
+                    # swallow; keep loop realtime
+                    pass
+            else:
+                time.sleep(0.002)
+
+    def send_aim(self, pan, tilt):
+        self.q.append(("aim", {"pan": int(pan), "tilt": int(tilt)}))
+
+    def send_fire(self):
+        self.q.append(("fire", None))
+
+sender = CommandSender(BASE_URL)
+
+# --------------------------- HSV tuner UI -------------------------------
+def create_hsv_tuner():
+    cv2.namedWindow("HSV Tuner", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("HSV Tuner", 420, 300)
+    # Starting point for yellow; tune as needed
+    cv2.createTrackbar("H low",  "HSV Tuner", 20, 179, lambda v: None)
+    cv2.createTrackbar("H high", "HSV Tuner", 35, 179, lambda v: None)
+    cv2.createTrackbar("S low",  "HSV Tuner", 100, 255, lambda v: None)
+    cv2.createTrackbar("S high", "HSV Tuner", 255, 255, lambda v: None)
+    cv2.createTrackbar("V low",  "HSV Tuner", 100, 255, lambda v: None)
+    cv2.createTrackbar("V high", "HSV Tuner", 255, 255, lambda v: None)
+
+def get_hsv_range():
+    hL = cv2.getTrackbarPos("H low",  "HSV Tuner")
+    hH = cv2.getTrackbarPos("H high", "HSV Tuner")
+    sL = cv2.getTrackbarPos("S low",  "HSV Tuner")
+    sH = cv2.getTrackbarPos("S high", "HSV Tuner")
+    vL = cv2.getTrackbarPos("V low",  "HSV Tuner")
+    vH = cv2.getTrackbarPos("V high", "HSV Tuner")
+    lower = np.array([hL, sL, vL], dtype=np.uint8)
+    upper = np.array([hH, sH, vH], dtype=np.uint8)
+    return lower, upper
+
+# --------------------- Yellow detection & centroid ---------------------
+def detect_yellow(frame, lower, upper, min_area=800):
+    """
+    Returns (center, bbox, area, mask)
+    center: (cx,cy) or None
+    bbox: (x,y,w,h) or None
+    area: int
+    mask: binary mask (uint8)
+    """
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, lower, upper)
+
+    # Keep kernels lightweight to avoid lag
+    mask = cv2.GaussianBlur(mask, (5, 5), 0)
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None, None, 0, mask
+
+    best = max(cnts, key=cv2.contourArea)
+    area = int(cv2.contourArea(best))
+    if area < min_area:
+        return None, None, 0, mask
+
+    x, y, w, h = cv2.boundingRect(best)
+    M = cv2.moments(best)
+    if M["m00"] == 0:
+        cx, cy = x + w // 2, y + h // 2
+    else:
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+
+    return (cx, cy), (x, y, w, h), area, mask
+
+# --------------------------- Mapping & smoothing -----------------------
+def pixel_to_servo(cx, cy, w, h):
+    """
+    Map centroid (pixels) -> servo angles.
+    X is inverted, Y is not inverted.
+    """
+    inv_x = w - cx
+    pan  = (inv_x / w) * (PAN_MAX - PAN_MIN) + PAN_MIN
+    tilt = (cy    / h) * (TILT_MAX - TILT_MIN) + TILT_MIN
+    pan  = max(PAN_MIN,  min(PAN_MAX,  pan))
+    tilt = max(TILT_MIN, min(TILT_MAX, tilt))
+    return pan, tilt
+
+def smooth_step(current, target, alpha):
+    return current + alpha * (target - current)
+
+# --------------------------- Threaded capture --------------------------
+class VideoStream:
+    """
+    Grabs frames in a dedicated thread and always provides the freshest frame.
+    """
+    def __init__(self, src=0, width=1280, height=720, fps=30):
+        self.cap = cv2.VideoCapture(src)
+        # Hints to camera/driver: small buffer, target fps, MJPG if available
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)     # may be ignored by some backends
+        self.cap.set(cv2.CAP_PROP_FPS, fps)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         try:
-            data = {"pan": int(pan), "tilt": int(tilt)}
-            response = requests.post(
-                f"{self.esp32_url}/aim",
-                json=data,
-                timeout=1
-            )
-            self.current_pan = pan
-            self.current_tilt = tilt
-            print(f"[AIM] Pan: {pan:.0f}° | Tilt: {tilt:.0f}°")
-        except Exception as e:
-            print(f"[ERROR] Aim failed: {e}")
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')  # often lower latency
+            self.cap.set(cv2.CAP_PROP_FOURCC, fourcc)
+        except Exception:
+            pass
 
-    def fire(self):
-        """Trigger water pump."""
-        if self.fire_lock.acquire(blocking=False):
-            try:
-                response = requests.get(f"{self.esp32_url}/fire", timeout=1)
-                print("[FIRE] Water pump activated!")
-            except Exception as e:
-                print(f"[ERROR] Fire failed: {e}")
-            finally:
-                self.fire_lock.release()
+        self.lock = threading.Lock()
+        self.frame = None
+        self.stopped = False
+        self.thread = threading.Thread(target=self.update, daemon=True)
+        self.thread.start()
 
-    def reset(self):
-        """Reset servos to center."""
+    def update(self):
+        while not self.stopped:
+            ok, f = self.cap.read()
+            if not ok:
+                # brief sleep to avoid tight loop if camera fails
+                time.sleep(0.005)
+                continue
+            with self.lock:
+                self.frame = f
+
+    def read(self):
+        with self.lock:
+            return self.frame
+
+    def release(self):
+        self.stopped = True
+        time.sleep(0.02)
         try:
-            response = requests.get(f"{self.esp32_url}/reset", timeout=1)
-            self.current_pan = 90
-            self.current_tilt = 90
-            print("[RESET] Returned to center position")
-        except Exception as e:
-            print(f"[ERROR] Reset failed: {e}")
+            self.cap.release()
+        except Exception:
+            pass
 
-def mouse_callback(event, x, y, flags, param):
-    """Handle mouse click on video frame."""
-    if event == cv2.EVENT_LBUTTONDOWN:
-        controller = param
-
-        center_x = FRAME_WIDTH // 2
-        center_y = FRAME_HEIGHT // 2
-
-        offset_x = x - center_x
-        offset_y = y - center_y
-
-        # Convert pixel offsets to servo angles
-        new_pan = 90 - (offset_x * PAN_SCALE)
-        new_tilt = 90 + (offset_y * TILT_SCALE)  # Invert Y axis
-
-
-        # Clamp to servo limits
-        new_pan = max(30, min(180, new_pan))
-        new_tilt = max(60, min(180, new_tilt))
-
-        controller.aim(new_pan, new_tilt)
-        print(f"[CLICK] X:{x} Y:{y} → Pan:{new_pan:.0f}° Tilt:{new_tilt:.0f}°")
-
+# -------------------------------- Main ---------------------------------
 def main():
-    controller = WaterGunController(ESP32_IP)
-    print(f"[INIT] Connecting to ESP32 at {ESP32_IP}...")
-    time.sleep(1)
+    global AUTO_FIRE
 
-    controller.reset()
-    time.sleep(0.5)
+    stream = VideoStream(VIDEO_SOURCE, width=1280, height=720, fps=30)
 
-    print(f"[STREAM] Opening IP camera stream at {IP_CAM_URL}...")
-    cap = cv2.VideoCapture(IP_CAM_URL)
-    if not cap.isOpened():
-        print("[ERROR] Cannot open video stream")
-        return
+    create_hsv_tuner()
 
-    cv2.namedWindow("Water Gun Targeting System")
-    cv2.setMouseCallback("Water Gun Targeting System", mouse_callback, controller)
+    cv2.namedWindow("Water Gun Control", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Water Gun Control", 960, 540)
 
-    print("\n" + "="*50)
-    print("WATER GUN TARGETING SYSTEM")
-    print("="*50)
-    print("Controls:")
-    print("  • LEFT CLICK: Aim at target location and fire")
-    print("  • SPACEBAR: Reset to center")
-    print("  • F: Fire water pump")
-    print("  • Q: Quit")
-    print("="*50 + "\n")
+    # Show mask optionally; press 'm' to toggle
+    show_mask = True
+
+    print("🟡 Yellow tracking mode (mouse control removed).")
+    print("Keys:  Q = quit,  F = fire once,  A = toggle auto-fire,  M = toggle mask")
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("[ERROR] Failed to read frame")
+        frame = stream.read()
+        if frame is None:
+            # camera not ready yet
+            time.sleep(0.002)
+            continue
+
+        state.frame_w = frame.shape[1]
+        state.frame_h = frame.shape[0]
+
+        # 1) Detect yellow
+        lower, upper = get_hsv_range()
+        center, bbox, area, mask = detect_yellow(frame, lower, upper, MIN_AREA)
+        state.target_area = area
+        state.have_target = center is not None
+
+        # 2) Visual feedback
+        if bbox is not None:
+            x, y, w, h = bbox
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
+            cv2.circle(frame, center, 5, (0, 255, 255), -1)
+            cv2.putText(frame, f"area:{area}", (x, y - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        else:
+            cv2.putText(frame, "No yellow target", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+        # 3) Convert centroid -> servo target, smooth, and send @ ~14 Hz
+        now = time.time()
+        if center is not None:
+            tgt_pan, tgt_tilt = pixel_to_servo(center[0], center[1], state.frame_w, state.frame_h)
+            state.pan  = smooth_step(state.pan,  tgt_pan,  SMOOTH_ALPHA)
+            state.tilt = smooth_step(state.tilt, tgt_tilt, SMOOTH_ALPHA)
+
+            if (now - state.last_sent) >= SEND_PERIOD:
+                sender.send_aim(state.pan, state.tilt)  # non-blocking
+                state.last_sent = now
+
+            # Optional auto fire on large blob
+            if AUTO_FIRE and (area > AUTO_FIRE_AREA) and (now > state.reload_until):
+                sender.send_fire()  # non-blocking
+                state.reload_until = now + RELOAD_SECONDS
+
+        # 4) Overlay HUD
+        hud = [
+            f"Pan:{int(state.pan)}  Tilt:{int(state.tilt)}",
+            f"Area:{state.target_area}  AutoFire:{'ON' if AUTO_FIRE else 'OFF'}",
+            f"Resolution:{state.frame_w}x{state.frame_h}"
+        ]
+        for i, t in enumerate(hud):
+            cv2.putText(frame, t, (10, 60 + i * 24),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
+
+        # 5) Show frames
+        cv2.imshow("Water Gun Control", frame)
+        if show_mask:
+            cv2.imshow("Yellow Mask", mask)
+
+        # 6) Keys
+        k = cv2.waitKey(1) & 0xFF
+        if k == ord('q'):
             break
+        elif k == ord('f'):
+            if time.time() > state.reload_until:
+                sender.send_fire()
+                state.reload_until = time.time() + RELOAD_SECONDS
+        elif k == ord('a'):
+            AUTO_FIRE = not AUTO_FIRE
+            print(f"Auto-fire: {'ON' if AUTO_FIRE else 'OFF'}")
+        elif k == ord('m'):
+            show_mask = not show_mask
 
-        frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
-
-        # Draw crosshair at center
-        cx, cy = FRAME_WIDTH // 2, FRAME_HEIGHT // 2
-        cv2.circle(frame, (cx, cy), 20, (0, 255, 0), 2)
-        cv2.line(frame, (cx-30, cy), (cx+30, cy), (0, 255, 0), 2)
-        cv2.line(frame, (cx, cy-30), (cx, cy+30), (0, 255, 0), 2)
-
-        # Draw grid lines every 50 pixels
-        for i in range(0, FRAME_WIDTH, 50):
-            cv2.line(frame, (i, 0), (i, FRAME_HEIGHT), (100,100,100), 1)
-        for i in range(0, FRAME_HEIGHT, 50):
-            cv2.line(frame, (0, i), (FRAME_WIDTH, i), (100,100,100), 1)
-
-        status_text = f"Pan: {controller.current_pan:.0f}° | Tilt: {controller.current_tilt:.0f}°"
-        cv2.putText(frame, status_text, (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
-        cv2.putText(frame, "CLICK TO AIM & FIRE", (10, FRAME_HEIGHT - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
-
-        cv2.imshow("Water Gun Targeting System", frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            print("[EXIT] Quitting application...")
-            break
-        elif key == ord(' '):
-            controller.reset()
-        elif key == ord('f'):
-            controller.fire()
-
-    cap.release()
+    stream.release()
     cv2.destroyAllWindows()
 
+# ---------------------------- Entrypoint -------------------------------
 if __name__ == "__main__":
-    main()
+    try:
+        # Small OpenCV optimization flag
+        cv2.setUseOptimized(True)
+    except Exception:
+        pass
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n👋 Shutting down...")

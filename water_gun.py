@@ -6,7 +6,7 @@ from collections import deque
 from datetime import datetime
 
 # ESP32 configuration
-ESP32_IP = "10.93.232.196"  # Change to your ESP32 IP
+ESP32_IP = "10.42.0.225"  # Change to your ESP32 IP
 ESP32_PORT = 80
 BASE_URL = f"http://{ESP32_IP}:{ESP32_PORT}"
 

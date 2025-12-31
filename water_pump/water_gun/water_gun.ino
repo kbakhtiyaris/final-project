@@ -5,7 +5,7 @@
 // WiFi Credentials - replace with your network infoTilt
 //const char* ssid = "FiberHGW_TPFAC0_2.4GHz";
 //const char* password = "dNWwNHKD";
-const char* ssid = "OPPOA55";
+const char* ssid = "keres";
 const char* password = "12312345";
 
 
@@ -59,8 +59,8 @@ let moveUp = false;
 let moveDown = false;
 
 // Settings
-const WASD_SPEED = 1;     // degrees per frame
-const MOUSE_SENS   = 0.1;  // lower = smoother, higher = faster
+const WASD_SPEED = 2;     // degrees per frame
+const MOUSE_SENS   = 0.3;  // lower = smoother, higher = faster
 
 let mouseControlEnabled = true;
 
@@ -143,7 +143,7 @@ function movementLoop() {
 movementLoop();
 </script>
 
-</head>
+</head>f
 <body>
   <h1>Gun Control panel.</h1>
   <h2>About the project.</h2>
